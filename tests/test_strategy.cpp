@@ -259,6 +259,80 @@ TEST(MarketMaking, RapidUpdates) {
   }
 }
 
+// Helper: pull the (bid_price, ask_price) from the strategy's pending orders.
+void QuotedPrices(MarketMaking& mm, Price* bid, Price* ask) {
+  *bid = 0;
+  *ask = 0;
+  for (const Order& o : mm.get_pending_orders()) {
+    if (o.side == kBuy) *bid = o.price;
+    else *ask = o.price;
+  }
+}
+
+// Inventory skew: a long position shifts BOTH quotes down (to offload).
+TEST(MarketMaking, InventorySkewLeansAgainstPosition) {
+  SymbolMaster sm = MakeSymbols();
+  MarketMakingConfig cfg;
+  cfg.max_position_lots = 10;
+  cfg.max_inv_skew_ticks = 2;  // CM lot 1 -> max_pos_units = 10.
+  MarketMaking mm(&sm, cfg);
+  mm.set_now(At(9, 30, 0));
+
+  OrderBook book(2885, 5);
+  SeedBook(book, 2885, 1000000, 1000010);
+
+  // Flat: naive quotes (bid 999995, ask 1000015).
+  mm.on_book_update(2885, book);
+  Price flat_bid, flat_ask;
+  QuotedPrices(mm, &flat_bid, &flat_ask);
+  EXPECT_EQ(flat_bid, 999995);
+  EXPECT_EQ(flat_ask, 1000015);
+
+  // Go +5 long -> inv skew = 5*2/10 = 1 tick down on both sides.
+  FillReport f{};
+  f.token = 2885;
+  f.side = kBuy;
+  f.fill_qty = 5;
+  f.remaining_qty = 0;
+  mm.on_fill(f);
+  mm.on_book_update(2885, book);
+  Price long_bid, long_ask;
+  QuotedPrices(mm, &long_bid, &long_ask);
+  EXPECT_EQ(long_bid, 999990);  // shifted down one tick
+  EXPECT_EQ(long_ask, 1000010);
+}
+
+// Order-flow skew: a bid-heavy book shifts BOTH quotes up (ride the pressure).
+TEST(MarketMaking, OrderFlowSkewLeansWithPressure) {
+  SymbolMaster sm = MakeSymbols();
+  MarketMakingConfig cfg;
+  cfg.max_flow_skew_ticks = 2;
+  MarketMaking mm(&sm, cfg);
+  mm.set_now(At(9, 30, 0));
+
+  // Balanced book: equal size -> no flow skew -> naive quotes.
+  OrderBook balanced(2885, 5);
+  balanced.apply_event(Add(1, kBuy, 1000000, 100, 2885));
+  balanced.apply_event(Add(2, kSell, 1000010, 100, 2885));
+  mm.on_book_update(2885, balanced);
+  Price bal_bid, bal_ask;
+  QuotedPrices(mm, &bal_bid, &bal_ask);
+  EXPECT_EQ(bal_bid, 999995);
+  EXPECT_EQ(bal_ask, 1000015);
+
+  // Bid-heavy book: 100 vs 10 -> flow = (90)*2/110 = 1 tick up.
+  OrderBook heavy(2885, 5);
+  heavy.apply_event(Add(3, kBuy, 1000000, 100, 2885));
+  heavy.apply_event(Add(4, kSell, 1000010, 10, 2885));
+  MarketMaking mm2(&sm, cfg);
+  mm2.set_now(At(9, 30, 0));
+  mm2.on_book_update(2885, heavy);
+  Price hv_bid, hv_ask;
+  QuotedPrices(mm2, &hv_bid, &hv_ask);
+  EXPECT_GT(hv_bid, bal_bid);  // shifted up
+  EXPECT_GT(hv_ask, bal_ask);
+}
+
 // 14. on_book_update latency budget.
 TEST(MarketMaking, Latency) {
   SymbolMaster sm = MakeSymbols();

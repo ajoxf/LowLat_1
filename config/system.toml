@@ -79,6 +79,9 @@ max_position_lots = 25
 max_spread_ticks = 3      # Do not quote into spreads wider than this.
 quote_ttl_ns = 500000     # Cancel/refresh quotes older than 0.5 ms.
 quote_lots = 1            # Lots to quote per side.
+# Smart-quoting (0 = naive "one tick inside the touch"):
+max_inv_skew_ticks = 2    # Lean against inventory: shift quotes to flatten position.
+max_flow_skew_ticks = 1   # Lean with order-flow imbalance (top-of-book pressure).
 
 [monitoring]
 # Alert thresholds for the monitoring dashboard (Core 7).

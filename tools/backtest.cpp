@@ -75,11 +75,23 @@ std::vector<hft::MarketEvent> LoadEvents(const char* path) {
 
 }  // namespace
 
-int main(int argc, char** argv) {
-  const char* capture = argc >= 2 ? argv[1] : nullptr;
-  const char* metrics_path = argc >= 3 ? argv[2] : "backtest_metrics.jsonl";
+namespace {
 
-  // Instrument: RELIANCE-like, wide band so synthetic walk stays tradable.
+struct BtResult {
+  uint64_t orders_sent = 0;
+  uint64_t orders_rejected = 0;
+  uint64_t fills = 0;
+  int64_t position = 0;
+  int64_t pnl_inr = 0;
+  uint64_t lat_p50 = 0;
+  uint64_t lat_p99 = 0;
+  uint64_t lat_p999 = 0;
+};
+
+// Run the full pipeline + fill simulator over `events` with the given strategy
+// config. Optionally writes a dashboard metrics file.
+BtResult RunBacktest(const std::vector<hft::MarketEvent>& events,
+                     const hft::MarketMakingConfig& mm_cfg, const char* metrics_path) {
   hft::SymbolMaster symbols;
   hft::Instrument cm{};
   cm.token = kToken;
@@ -88,14 +100,11 @@ int main(int argc, char** argv) {
   cm.lot_size = 1;
   cm.tick_size = kTick;
   cm.prev_close = kMid;
-  cm.circuit_pct_x100 = 2000;  // 20%.
+  cm.circuit_pct_x100 = 2000;  // 20% band.
   symbols.put(cm);
 
   hft::BookManager books;
   books.add_token(kToken, kTick);
-
-  hft::MarketMakingConfig mm_cfg;
-  mm_cfg.max_position_lots = 50;
   hft::MarketMaking strat(&symbols, mm_cfg);
 
   hft::RiskConfig risk_cfg;
@@ -109,16 +118,10 @@ int main(int argc, char** argv) {
   pipe.set_now(hft::ist_time_of_day_ns(hft::ist_now_ns(), 10, 0, 0));
 
   hft::FillSimulator fillsim;
-  std::vector<hft::MarketEvent> events = LoadEvents(capture);
-
   hft::MetricsWriter metrics;
-  if (!metrics.open(metrics_path)) {
-    std::fprintf(stderr, "warning: cannot write metrics to %s\n", metrics_path);
-  }
-  // ~200 points across the run, whatever its length.
+  const bool want_metrics = metrics_path != nullptr && metrics.open(metrics_path);
   const uint64_t snapshot_every = events.empty() ? 1 : (events.size() / 200) + 1;
 
-  // Simple mark-to-market PnL accounting (paisa).
   int64_t cash_paisa = 0;
   int64_t position = 0;
   hft::Price mark = kMid;
@@ -129,7 +132,6 @@ int main(int argc, char** argv) {
     if (static_cast<hft::MtbtMsgType>(ev.type) == hft::MtbtMsgType::kSnapQuote) {
       mark = (ev.bid_price + ev.ask_price) / 2;
     }
-    // 1. Fill our existing resting quotes against this event.
     fillsim.on_event(ev, [&](const hft::FillReport& f) {
       pipe.on_fill(f);
       if (f.side == hft::kBuy) {
@@ -141,16 +143,12 @@ int main(int argc, char** argv) {
       }
       ++maker_fills;
     });
-    // 2. Process the event -> update book, generate new quotes.
     pipe.process(ev);
-    // 3. Register newly-sent quotes with the fill simulator.
     for (const hft::Order& o : pipe.last_sent()) {
       fillsim.register_order(o);
     }
-
-    // 4. Periodically snapshot metrics for the dashboard.
     ++event_index;
-    if (event_index % snapshot_every == 0) {
+    if (want_metrics && event_index % snapshot_every == 0) {
       hft::MetricSnapshot snap;
       snap.t = event_index;
       snap.events = pipe.stats().events;
@@ -167,27 +165,56 @@ int main(int argc, char** argv) {
   }
   metrics.flush();
 
-  const int64_t pnl_paisa = cash_paisa + position * mark;
-  const hft::PipelineStats& s = pipe.stats();
+  BtResult r;
+  r.orders_sent = pipe.stats().orders_sent;
+  r.orders_rejected = pipe.stats().orders_rejected;
+  r.fills = maker_fills;
+  r.position = position;
+  r.pnl_inr = (cash_paisa + position * mark) / 100;
+  r.lat_p50 = pipe.latency().p50();
+  r.lat_p99 = pipe.latency().p99();
+  r.lat_p999 = pipe.latency().p999();
+  return r;
+}
 
-  std::printf("\n=== backtest report ===\n");
-  std::printf("events        : %llu\n", static_cast<unsigned long long>(s.events));
-  std::printf("orders sent   : %llu\n", static_cast<unsigned long long>(s.orders_sent));
-  std::printf("orders reject : %llu (risk)\n",
-              static_cast<unsigned long long>(s.orders_rejected));
-  std::printf("maker fills   : %llu\n", static_cast<unsigned long long>(maker_fills));
-  std::printf("final position: %lld units\n", static_cast<long long>(position));
-  std::printf("gross PnL     : Rs %.2f (mark-to-market @ %lld paisa)\n",
-              static_cast<double>(pnl_paisa) / 100.0, static_cast<long long>(mark));
-  std::printf("tick-to-trade : p50=%lluns p99=%lluns p999=%lluns (n=%llu)\n",
-              static_cast<unsigned long long>(pipe.latency().p50()),
-              static_cast<unsigned long long>(pipe.latency().p99()),
-              static_cast<unsigned long long>(pipe.latency().p999()),
-              static_cast<unsigned long long>(pipe.latency().count()));
-  std::printf("metrics       : %s (%llu snapshots)\n", metrics_path,
-              static_cast<unsigned long long>(metrics.rows()));
+void PrintRow(const char* name, const BtResult& r) {
+  std::printf("%-8s | %9lld | %7llu | %6llu | %5lld | p99=%llu ns\n", name,
+              static_cast<long long>(r.pnl_inr), static_cast<unsigned long long>(r.fills),
+              static_cast<unsigned long long>(r.orders_sent),
+              static_cast<long long>(r.position), static_cast<unsigned long long>(r.lat_p99));
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+  const char* capture = argc >= 2 ? argv[1] : nullptr;
+
+  std::vector<hft::MarketEvent> events = LoadEvents(capture);
+
+  // Naive: one tick inside the touch, no skew.
+  hft::MarketMakingConfig naive;
+  naive.max_position_lots = 50;
+
+  // Smart: same, plus inventory-skew and order-flow-imbalance quoting.
+  hft::MarketMakingConfig smart = naive;
+  smart.max_inv_skew_ticks = 2;
+  smart.max_flow_skew_ticks = 1;
+
+  const BtResult rn = RunBacktest(events, naive, "backtest_metrics_naive.jsonl");
+  const BtResult rs = RunBacktest(events, smart, "backtest_metrics.jsonl");
+
+  std::printf("\n=== backtest comparison (same data, %zu events) ===\n", events.size());
+  std::printf("variant  | PnL (Rs) |  fills  | orders | pos   | latency\n");
+  std::printf("---------+-----------+---------+--------+-------+-----------\n");
+  PrintRow("naive", rn);
+  PrintRow("smart", rs);
+  const int64_t delta = rs.pnl_inr - rn.pnl_inr;
+  std::printf("---------+-----------+---------+--------+-------+-----------\n");
+  std::printf("PnL improvement (smart - naive): Rs %lld\n", static_cast<long long>(delta));
+
   std::printf("\nNOTE: optimistic front-of-queue fill model + synthetic data.\n");
   std::printf("Use recorded NSE MTBT and a queue-aware model before trusting PnL.\n");
-  std::printf("Visualise: open dashboard/index.html and load %s\n", metrics_path);
+  std::printf("Visualise: serve the repo and open dashboard/index.html\n");
+  std::printf("  smart -> backtest_metrics.jsonl   naive -> backtest_metrics_naive.jsonl\n");
   return 0;
 }

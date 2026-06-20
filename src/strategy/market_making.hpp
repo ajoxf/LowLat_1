@@ -29,6 +29,9 @@ struct MarketMakingConfig {
   int max_spread_ticks = 3;       // Do not quote into spreads wider than this.
   uint64_t quote_ttl_ns = 500'000;  // Cancel/refresh quotes older than this.
   Quantity quote_lots = 1;        // Lots to quote per side.
+  // Smart-quoting knobs (0 = the naive "one tick inside the touch" behaviour).
+  int max_inv_skew_ticks = 0;     // Lean against inventory: shift quotes to flatten.
+  int max_flow_skew_ticks = 0;    // Lean with order-flow imbalance (book pressure).
 };
 
 class MarketMaking : public StrategyBase {
@@ -92,8 +95,14 @@ class MarketMaking : public StrategyBase {
     Price band_hi = 0;
     const bool band = PriceBand(token, &band_lo, &band_hi);
 
-    const Price desired_bid = bid->price - tick;
-    const Price desired_ask = ask->price + tick;
+    // Base quotes are one tick inside the touch, then shifted by inventory and
+    // order-flow skew (see ComputeDesired). With both skew knobs at 0 this is
+    // identical to the naive strategy.
+    const Quantity max_pos_units = static_cast<Quantity>(cfg_.max_position_lots) * lot;
+    Price desired_bid = 0;
+    Price desired_ask = 0;
+    ComputeDesired(*bid, *ask, tick, position_[token], max_pos_units, &desired_bid,
+                   &desired_ask);
 
     // Bid side: only if we are not already at max long and price is in band.
     const bool bid_ok = net_lots < cfg_.max_position_lots &&
@@ -177,6 +186,39 @@ class MarketMaking : public StrategyBase {
     *hi = inst->prev_close + delta;
     return true;
   }
+
+  // Compute the desired bid/ask, starting one tick inside the touch and shifting
+  // the whole pair by an integer number of ticks:
+  //   * inventory skew: when long (positive position) shift DOWN to offload
+  //     (and vice-versa) -- leans against risk;
+  //   * order-flow skew: when the top of book is bid-heavy (buy pressure) shift
+  //     UP to ride the likely up-move instead of being adversely selected.
+  // All integer math -- no floating point on the hot path.
+  void ComputeDesired(const PriceLevel& bb, const PriceLevel& ba, Price tick,
+                      Quantity pos_units, Quantity max_pos_units, Price* desired_bid,
+                      Price* desired_ask) const {
+    int inv = 0;
+    if (cfg_.max_inv_skew_ticks > 0 && max_pos_units > 0) {
+      inv = static_cast<int>(static_cast<int64_t>(pos_units) * cfg_.max_inv_skew_ticks /
+                             max_pos_units);
+      inv = Clamp(inv, cfg_.max_inv_skew_ticks);
+    }
+    int flow = 0;
+    if (cfg_.max_flow_skew_ticks > 0) {
+      const int64_t denom = static_cast<int64_t>(bb.total_quantity) + ba.total_quantity;
+      if (denom > 0) {
+        flow = static_cast<int>(
+            static_cast<int64_t>(bb.total_quantity - ba.total_quantity) *
+            cfg_.max_flow_skew_ticks / denom);
+        flow = Clamp(flow, cfg_.max_flow_skew_ticks);
+      }
+    }
+    const Price shift = static_cast<Price>(flow - inv) * tick;
+    *desired_bid = (bb.price - tick) + shift;
+    *desired_ask = (ba.price + tick) + shift;
+  }
+
+  static int Clamp(int v, int lim) { return v > lim ? lim : (v < -lim ? -lim : v); }
 
   void EmitNew(Token token, bool is_bid, Price price, Quantity qty, Timestamp now,
                ClOrdId* out_id) {
