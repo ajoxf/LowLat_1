@@ -389,26 +389,36 @@ class OrderBook {
   }
 
   BookResult ApplyTrade(const MarketEvent& ev) {
-    // A trade reduces the resting order(s). MTBT trade carries the resting
-    // order number(s) in ev.order_no; reduce by traded qty.
-    OrderRecord* rec = FindOrder(ev.order_no);
-    if (rec == nullptr) {
-      return BookResult::kUnknownOrder;
+    // A trade reduces both resting orders it matched. MTBT carries the buy
+    // resting order in order_no and the sell resting order in order_no2.
+    const bool a = ReduceResting(ev.order_no, ev.qty);
+    const bool b = ReduceResting(ev.order_no2, ev.qty);
+    return (a || b) ? BookResult::kOk : BookResult::kUnknownOrder;
+  }
+
+  // Reduce a single resting order by `traded`, removing it when fully consumed.
+  // Returns true if the order was found.
+  bool ReduceResting(int64_t order_no, Quantity traded) {
+    if (order_no == 0) {
+      return false;
     }
-    Quantity traded = ev.qty;
-    bool fully = traded >= rec->qty;
-    Quantity reduce = fully ? rec->qty : traded;
+    OrderRecord* rec = FindOrder(order_no);
+    if (rec == nullptr) {
+      return false;
+    }
+    const bool fully = traded >= rec->qty;
+    const Quantity reduce = fully ? rec->qty : traded;
     if (rec->side == kBuy) {
       RemoveQtyFromLevel<true>(rec->price, reduce, fully);
     } else {
       RemoveQtyFromLevel<false>(rec->price, reduce, fully);
     }
     if (fully) {
-      EraseOrder(ev.order_no);
+      EraseOrder(order_no);
     } else {
       rec->qty -= reduce;
     }
-    return BookResult::kOk;
+    return true;
   }
 
   Token token_;

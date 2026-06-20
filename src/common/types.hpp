@@ -62,7 +62,11 @@ struct MarketEvent {
   uint32_t stream_id;    // MTBT stream id (1..N).
   uint64_t seq_no;       // Per-stream MTBT sequence number (resets daily).
 
-  // For Snap Quote ('Q') messages we carry both sides of top-of-book.
+  // Trade ('T') only: the two resting order numbers and the trade number.
+  int64_t order_no2;     // Second resting order number (sell side on a trade).
+  int64_t trade_no;      // NSE trade number for reconciliation.
+
+  // Snap Quote ('Q') only: both sides of top-of-book.
   Price bid_price;
   Quantity bid_qty;
   Price ask_price;
