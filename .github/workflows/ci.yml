@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.compiler }} build + test
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - compiler: gcc
+            cc: gcc-13
+            cxx: g++-13
+          - compiler: clang
+            cc: clang-18
+            cxx: clang++-18
+    env:
+      CC: ${{ matrix.cc }}
+      CXX: ${{ matrix.cxx }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build ${{ matrix.cxx }}
+      - name: Configure
+        # -march=native is disabled in CI so the build is portable across runners.
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DHFT_NATIVE_ARCH=OFF
+      - name: Build
+        run: cmake --build build -j
+      - name: Test
+        run: ctest --test-dir build --output-on-failure -j
+
+  sanitizers:
+    name: ${{ matrix.san }} sanitizer
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - san: address
+            flags: -DHFT_ENABLE_ASAN=ON -DHFT_ENABLE_UBSAN=ON
+          - san: thread
+            flags: -DHFT_ENABLE_TSAN=ON
+    env:
+      CC: gcc-13
+      CXX: g++-13
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build g++-13
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+          -DHFT_NATIVE_ARCH=OFF -DHFT_BUILD_BENCHMARKS=OFF -DHFT_BUILD_TOOLS=OFF
+          ${{ matrix.flags }}
+      - name: Build
+        run: cmake --build build -j
+      - name: Test
+        run: ctest --test-dir build --output-on-failure -j
+
+  clang-tidy:
+    name: clang-tidy
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build clang-tidy-18 clang-18
+      - name: Configure (export compile commands)
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          -DHFT_NATIVE_ARCH=OFF -DHFT_BUILD_TESTS=OFF -DHFT_BUILD_BENCHMARKS=OFF
+          -DCMAKE_CXX_COMPILER=clang++-18
+      - name: Run clang-tidy on sources
+        run: |
+          files=$(git ls-files 'src/*.cpp')
+          clang-tidy-18 -p build $files
