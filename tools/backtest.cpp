@@ -14,6 +14,7 @@
 
 #include "common/time_utils.hpp"
 #include "feed_handler/mtbt_parser.hpp"
+#include "monitor/metrics.hpp"
 #include "order_book/book_manager.hpp"
 #include "order_manager/order_manager.hpp"
 #include "pipeline.hpp"
@@ -76,6 +77,7 @@ std::vector<hft::MarketEvent> LoadEvents(const char* path) {
 
 int main(int argc, char** argv) {
   const char* capture = argc >= 2 ? argv[1] : nullptr;
+  const char* metrics_path = argc >= 3 ? argv[2] : "backtest_metrics.jsonl";
 
   // Instrument: RELIANCE-like, wide band so synthetic walk stays tradable.
   hft::SymbolMaster symbols;
@@ -109,11 +111,19 @@ int main(int argc, char** argv) {
   hft::FillSimulator fillsim;
   std::vector<hft::MarketEvent> events = LoadEvents(capture);
 
+  hft::MetricsWriter metrics;
+  if (!metrics.open(metrics_path)) {
+    std::fprintf(stderr, "warning: cannot write metrics to %s\n", metrics_path);
+  }
+  // ~200 points across the run, whatever its length.
+  const uint64_t snapshot_every = events.empty() ? 1 : (events.size() / 200) + 1;
+
   // Simple mark-to-market PnL accounting (paisa).
   int64_t cash_paisa = 0;
   int64_t position = 0;
   hft::Price mark = kMid;
   uint64_t maker_fills = 0;
+  uint64_t event_index = 0;
 
   for (const hft::MarketEvent& ev : events) {
     if (static_cast<hft::MtbtMsgType>(ev.type) == hft::MtbtMsgType::kSnapQuote) {
@@ -137,7 +147,25 @@ int main(int argc, char** argv) {
     for (const hft::Order& o : pipe.last_sent()) {
       fillsim.register_order(o);
     }
+
+    // 4. Periodically snapshot metrics for the dashboard.
+    ++event_index;
+    if (event_index % snapshot_every == 0) {
+      hft::MetricSnapshot snap;
+      snap.t = event_index;
+      snap.events = pipe.stats().events;
+      snap.orders_sent = pipe.stats().orders_sent;
+      snap.orders_rejected = pipe.stats().orders_rejected;
+      snap.fills = maker_fills;
+      snap.position = position;
+      snap.pnl_inr = (cash_paisa + position * mark) / 100;
+      snap.lat_p50 = pipe.latency().p50();
+      snap.lat_p99 = pipe.latency().p99();
+      snap.lat_p999 = pipe.latency().p999();
+      metrics.write(snap);
+    }
   }
+  metrics.flush();
 
   const int64_t pnl_paisa = cash_paisa + position * mark;
   const hft::PipelineStats& s = pipe.stats();
@@ -156,7 +184,10 @@ int main(int argc, char** argv) {
               static_cast<unsigned long long>(pipe.latency().p99()),
               static_cast<unsigned long long>(pipe.latency().p999()),
               static_cast<unsigned long long>(pipe.latency().count()));
+  std::printf("metrics       : %s (%llu snapshots)\n", metrics_path,
+              static_cast<unsigned long long>(metrics.rows()));
   std::printf("\nNOTE: optimistic front-of-queue fill model + synthetic data.\n");
   std::printf("Use recorded NSE MTBT and a queue-aware model before trusting PnL.\n");
+  std::printf("Visualise: open dashboard/index.html and load %s\n", metrics_path);
   return 0;
 }

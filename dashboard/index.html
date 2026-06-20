@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>NSE HFT — Algo Dashboard</title>
+<style>
+  :root {
+    --bg: #0e1116; --panel: #161b22; --line: #232a33; --text: #c9d1d9;
+    --muted: #7d8590; --green: #2ea043; --red: #e5534b; --blue: #4493f8;
+    --amber: #d29922; --purple: #a371f7;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.4 -apple-system, Segoe UI, Roboto, Helvetica, Arial, monospace; }
+  header { padding: 16px 22px; border-bottom: 1px solid var(--line);
+           display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
+  header h1 { font-size: 17px; margin: 0; letter-spacing: .3px; }
+  header .sub { color: var(--muted); font-size: 12px; }
+  .controls { margin-left: auto; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .controls input[type=text] { background: #0b0f14; color: var(--text);
+           border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; width: 220px; }
+  button, label.btn { background: #21262d; color: var(--text); border: 1px solid var(--line);
+           border-radius: 6px; padding: 6px 12px; cursor: pointer; font-size: 13px; }
+  button:hover, label.btn:hover { border-color: var(--blue); }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+           gap: 12px; padding: 18px 22px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+          padding: 14px 16px; }
+  .card .k { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .6px; }
+  .card .v { font-size: 22px; font-weight: 600; margin-top: 6px; }
+  .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 4px 22px 28px; }
+  .chart { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+  .chart h3 { margin: 0 0 6px; font-size: 13px; color: var(--text); font-weight: 600; }
+  .chart .legend { font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+  .chart .legend span { margin-right: 12px; }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 4px; vertical-align: middle; }
+  svg { width: 100%; height: 200px; display: block; }
+  .empty { color: var(--muted); padding: 40px 22px; }
+  .pos { color: var(--green); } .neg { color: var(--red); }
+  @media (max-width: 880px) { .charts { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>NSE HFT — Algo Dashboard</h1>
+    <div class="sub">tick-to-trade performance &amp; PnL · research/ops plane</div>
+  </div>
+  <div class="controls">
+    <input id="url" type="text" value="../backtest_metrics.jsonl" title="metrics file path/URL" />
+    <button id="fetchBtn">Fetch</button>
+    <label class="btn">Load file…<input id="file" type="file" accept=".jsonl,.json,.txt" hidden /></label>
+    <label class="btn"><input id="live" type="checkbox" /> Live (2s)</label>
+  </div>
+</header>
+
+<div id="status" class="empty">No data yet. Run <code>./build/tools/backtest</code> then
+  <b>Fetch</b> (served) or <b>Load file…</b> (<code>file://</code>) the produced
+  <code>backtest_metrics.jsonl</code>.</div>
+
+<div class="cards" id="cards" style="display:none"></div>
+
+<div class="charts" id="charts" style="display:none">
+  <div class="chart"><h3>Cumulative PnL (₹)</h3><div class="legend"><span><i class="dot" style="background:var(--green)"></i>equity</span></div><svg id="c_pnl"></svg></div>
+  <div class="chart"><h3>Net position (units)</h3><div class="legend"><span><i class="dot" style="background:var(--blue)"></i>position</span></div><svg id="c_pos"></svg></div>
+  <div class="chart"><h3>Orders sent vs fills (cumulative)</h3><div class="legend"><span><i class="dot" style="background:var(--purple)"></i>orders sent</span><span><i class="dot" style="background:var(--green)"></i>fills</span><span><i class="dot" style="background:var(--red)"></i>rejected</span></div><svg id="c_ord"></svg></div>
+  <div class="chart"><h3>Tick-to-trade latency (ns)</h3><div class="legend"><span><i class="dot" style="background:var(--green)"></i>p50</span><span><i class="dot" style="background:var(--amber)"></i>p99</span><span><i class="dot" style="background:var(--red)"></i>p999</span></div><svg id="c_lat"></svg></div>
+</div>
+
+<script>
+const COL = { green:'#2ea043', red:'#e5534b', blue:'#4493f8', amber:'#d29922', purple:'#a371f7', muted:'#7d8590', line:'#232a33' };
+
+function parseJsonl(text) {
+  const rows = [];
+  for (const ln of text.split('\n')) {
+    const s = ln.trim();
+    if (!s) continue;
+    try { rows.push(JSON.parse(s)); } catch (e) { /* skip partial last line */ }
+  }
+  return rows;
+}
+
+function fmtINR(v) {
+  const sign = v < 0 ? '-' : '';
+  return sign + '₹' + Math.abs(v).toLocaleString('en-IN');
+}
+
+function maxDrawdown(equity) {
+  let peak = -Infinity, mdd = 0;
+  for (const v of equity) { peak = Math.max(peak, v); mdd = Math.min(mdd, v - peak); }
+  return mdd; // <= 0
+}
+
+// Draw one or more y-series against a shared x. series: [{xs, ys, color}]
+function lineChart(svg, xs, series) {
+  const W = svg.clientWidth || 480, H = 200, padL = 52, padR = 10, padT = 12, padB = 22;
+  while (svg.firstChild) svg.removeChild(svg.firstChild);
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  if (!xs.length) return;
+  const NS = 'http://www.w3.org/2000/svg';
+  let ymin = Infinity, ymax = -Infinity;
+  for (const s of series) for (const y of s.ys) { ymin = Math.min(ymin, y); ymax = Math.max(ymax, y); }
+  if (ymin === ymax) { ymin -= 1; ymax += 1; }
+  // include zero in PnL/position-style charts when range crosses it
+  const xmin = xs[0], xmax = xs[xs.length - 1] || 1;
+  const sx = v => padL + (W - padL - padR) * (xmax === xmin ? 0.5 : (v - xmin) / (xmax - xmin));
+  const sy = v => padT + (H - padT - padB) * (1 - (v - ymin) / (ymax - ymin));
+
+  function add(tag, attrs) { const e = document.createElementNS(NS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]); svg.appendChild(e); return e; }
+
+  // gridlines + y labels (min, mid, max)
+  for (const frac of [0, 0.5, 1]) {
+    const yv = ymin + (ymax - ymin) * frac, y = sy(yv);
+    add('line', { x1: padL, y1: y, x2: W - padR, y2: y, stroke: COL.line, 'stroke-width': 1 });
+    const t = add('text', { x: 6, y: y + 3, fill: COL.muted, 'font-size': 10 });
+    t.textContent = Math.abs(yv) >= 1000 ? (yv/1000).toFixed(1)+'k' : Math.round(yv);
+  }
+  // zero line if range crosses zero
+  if (ymin < 0 && ymax > 0) add('line', { x1: padL, y1: sy(0), x2: W - padR, y2: sy(0),
+      stroke: COL.muted, 'stroke-width': 1, 'stroke-dasharray': '3,3' });
+
+  for (const s of series) {
+    let d = '';
+    for (let i = 0; i < xs.length; i++) d += (i ? 'L' : 'M') + sx(xs[i]).toFixed(1) + ' ' + sy(s.ys[i]).toFixed(1) + ' ';
+    add('path', { d, fill: 'none', stroke: s.color, 'stroke-width': 1.8 });
+  }
+}
+
+function render(rows) {
+  if (!rows.length) return;
+  document.getElementById('status').style.display = 'none';
+  document.getElementById('cards').style.display = '';
+  document.getElementById('charts').style.display = '';
+
+  const xs = rows.map(r => r.t);
+  const pnl = rows.map(r => r.pnl_inr);
+  const last = rows[rows.length - 1];
+  const fillRate = last.orders_sent ? (100 * last.fills / last.orders_sent) : 0;
+  const rejRate = (last.orders_sent + last.orders_rejected)
+      ? (100 * last.orders_rejected / (last.orders_sent + last.orders_rejected)) : 0;
+  const mdd = maxDrawdown(pnl);
+  const cls = v => v >= 0 ? 'pos' : 'neg';
+
+  const cards = [
+    ['Cumulative PnL', `<span class="${cls(last.pnl_inr)}">${fmtINR(last.pnl_inr)}</span>`],
+    ['Max drawdown', `<span class="neg">${fmtINR(mdd)}</span>`],
+    ['Fills', last.fills.toLocaleString('en-IN')],
+    ['Orders sent', last.orders_sent.toLocaleString('en-IN')],
+    ['Fill rate', fillRate.toFixed(1) + '%'],
+    ['Risk reject rate', rejRate.toFixed(1) + '%'],
+    ['Net position', `<span class="${cls(-Math.abs(last.position)+0.0001)}">${last.position}</span>`],
+    ['Latency p99', (last.lat_p99/1000).toFixed(2) + ' µs'],
+  ];
+  document.getElementById('cards').innerHTML = cards.map(
+    ([k, v]) => `<div class="card"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
+
+  lineChart(document.getElementById('c_pnl'), xs, [{ ys: pnl, color: COL.green }]);
+  lineChart(document.getElementById('c_pos'), xs, [{ ys: rows.map(r => r.position), color: COL.blue }]);
+  lineChart(document.getElementById('c_ord'), xs, [
+    { ys: rows.map(r => r.orders_sent), color: COL.purple },
+    { ys: rows.map(r => r.fills), color: COL.green },
+    { ys: rows.map(r => r.orders_rejected), color: COL.red },
+  ]);
+  lineChart(document.getElementById('c_lat'), xs, [
+    { ys: rows.map(r => r.lat_p50), color: COL.green },
+    { ys: rows.map(r => r.lat_p99), color: COL.amber },
+    { ys: rows.map(r => r.lat_p999), color: COL.red },
+  ]);
+}
+
+function loadText(text) { render(parseJsonl(text)); }
+
+async function fetchUrl() {
+  try {
+    const r = await fetch(document.getElementById('url').value + '?_=' + Date.now());
+    if (!r.ok) throw new Error(r.status);
+    loadText(await r.text());
+  } catch (e) {
+    document.getElementById('status').textContent =
+      'Fetch failed (' + e + '). On file:// use "Load file…" instead, or serve with: python3 -m http.server';
+  }
+}
+
+document.getElementById('fetchBtn').onclick = fetchUrl;
+document.getElementById('file').onchange = ev => {
+  const f = ev.target.files[0]; if (!f) return;
+  const reader = new FileReader();
+  reader.onload = () => loadText(reader.result);
+  reader.readAsText(f);
+};
+let timer = null;
+document.getElementById('live').onchange = ev => {
+  if (ev.target.checked) { fetchUrl(); timer = setInterval(fetchUrl, 2000); }
+  else if (timer) { clearInterval(timer); timer = null; }
+};
+// Try an initial fetch (works when served over http).
+fetchUrl();
+</script>
+</body>
+</html>

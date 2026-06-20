@@ -2,6 +2,8 @@ build/
 build-*/
 cmake-build-*/
 logs/
+*.jsonl
+*.mtbt
 .cache/
 *.o
 *.a
