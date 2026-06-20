@@ -1,0 +1,88 @@
+# NSE HFT system runtime configuration.
+# Prices are in paisa (rupees * 100). Times are IST. Every parameter below is
+# documented in plain English.
+
+[general]
+# Path to the daily NSE symbol master CSVs (refreshed from the NSE portal each
+# morning before market open).
+cm_symbols_csv = "config/nse_cm_symbols.csv"
+fo_symbols_csv = "config/nse_fo_symbols.csv"
+# Reload the symbol master at this IST time each trading morning.
+symbol_reload_ist = "08:30:00"
+
+[session_schedule]
+# NSE trading hours (IST). The strategy and risk manager gate on these.
+preopen_start = "09:00:00"   # Order collection, no matching.
+market_open   = "09:15:00"   # Continuous trading begins.
+preclose_cancel = "15:25:00" # Begin cancelling all open orders.
+market_close  = "15:30:00"   # Continuous trading ends.
+
+[colocation]
+# Local NIC interface IP at the NSE BKC colocation rack used for multicast
+# joins (must be the specific colo interface, not 0.0.0.0).
+nic_interface_ip = "10.0.0.2"
+# Set when OpenOnload is preloaded (ONLOAD acceleration is transparent).
+openonload = true
+
+[cpu_affinity]
+# Isolated cores (see GRUB isolcpus). Core 0 is left to the OS.
+logger_core       = 1
+feed_handler_core = 2
+book_strategy_core = 3
+order_send_core   = 4
+order_recv_core   = 5
+risk_core         = 6   # May run inline with core 3 for lower latency.
+monitor_core      = 7
+
+[market_data]
+# MTBT multicast streams. group1/group2 are NSE Source 1 / Source 2 (both must
+# be subscribed per NSE active-active guidelines). Obtain the real IPs/ports
+# from the NSE colocation circular (e.g. NSE/MSD/62785 or latest).
+# Format per stream: { stream_id, port, group1, group2 }
+streams = [
+  { stream_id = 1, port = 17201, group1 = "239.70.70.1", group2 = "239.70.71.1" },
+  { stream_id = 2, port = 17202, group1 = "239.70.70.2", group2 = "239.70.71.2" },
+]
+# Trigger a retransmit request if a gap persists beyond this (microseconds).
+retransmit_gap_us = 500
+
+[order_entry]
+# NSE NNF Gateway Router endpoint (assigns a specific gateway on login).
+gateway_router_ip   = "10.1.0.10"
+gateway_router_port = 9100
+trader_id  = 0          # Assigned by NSE on login.
+branch_id  = 0
+participant_id = ""     # NSE participant code.
+# Disable Nagle and keep send buffers minimal (handled in code).
+
+[risk]
+# NSE subscribed message-rate category. NSE disconnects above 110% of this.
+max_orders_per_sec = 1000
+# Maximum single-order quantity (FO: in contracts; CM: in shares).
+max_order_qty = 10000
+# Maximum net per-token position, in lots.
+max_token_position_lots = 25
+# Aggregate CM order-value cap, in rupees.
+max_cm_notional_inr = 100000000
+# Daily loss kill-switch threshold, in rupees (auto-activates the kill switch).
+max_daily_loss_inr = 1000000
+# Reject orders whose price deviates more than this percent from the market.
+price_sanity_pct = 2
+# Permit orders during the pre-open window (normally false).
+allow_preopen = false
+
+[strategy]
+# Tokens the market-making strategy runs on.
+watched_tokens = [2885, 26000, 26009]
+segment = "CM"            # CM or FO.
+max_position_lots = 25
+max_spread_ticks = 3      # Do not quote into spreads wider than this.
+quote_ttl_ns = 500000     # Cancel/refresh quotes older than 0.5 ms.
+quote_lots = 1            # Lots to quote per side.
+
+[monitoring]
+# Alert thresholds for the monitoring dashboard (Core 7).
+alert_p99_ns = 5000
+alert_rate_pct = 80           # Warn at 80% of the NSE message-rate limit.
+alert_daily_loss_pct = 50     # Warn at 50% of the daily-loss limit.
+json_log_path = "logs/monitor.jsonl"
