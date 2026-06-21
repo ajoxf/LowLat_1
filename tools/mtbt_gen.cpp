@@ -28,7 +28,7 @@ int main(int argc, char** argv) {
 
   hft::MtbtGenerator gen(token, mid, tick, /*seed=*/12345);
   std::vector<hft::MarketEvent> events;
-  gen.generate(events, count);
+  gen.generate_mbo(events, count);  // Depth-bearing MBO stream.
 
   std::vector<uint8_t> bytes;
   for (const auto& ev : events) {

@@ -102,6 +102,19 @@ class OrderBook {
   const PriceLevel& bid_at(size_t i) const { return bids_[i]; }
   const PriceLevel& ask_at(size_t i) const { return asks_[i]; }
 
+  // Displayed resting quantity at an exact price on the given side (0 if none).
+  // Used by the backtest to seed our queue position when we join a level.
+  Quantity displayed_qty_at(Side side, Price price) const {
+    const PriceLevel* levels = side == kBuy ? bids_ : asks_;
+    const size_t count = side == kBuy ? bid_count_ : ask_count_;
+    for (size_t i = 0; i < count; ++i) {
+      if (levels[i].price == price) {
+        return levels[i].total_quantity;
+      }
+    }
+    return 0;
+  }
+
   bool stale() const { return stale_; }
   uint64_t gap_count() const { return gap_count_; }
 

@@ -45,8 +45,8 @@ std::vector<hft::MarketEvent> LoadEvents(const char* path) {
   std::vector<hft::MarketEvent> events;
   if (path == nullptr) {
     hft::MtbtGenerator gen(kToken, kMid, kTick, 12345);
-    gen.generate(events, 200000);
-    std::printf("backtest: generated %zu synthetic events for token %u\n", events.size(),
+    gen.generate_mbo(events, 200000);  // Depth-bearing MBO stream (real queues).
+    std::printf("backtest: generated %zu synthetic MBO events for token %u\n", events.size(),
                 kToken);
     return events;
   }
@@ -144,8 +144,13 @@ BtResult RunBacktest(const std::vector<hft::MarketEvent>& events,
       ++maker_fills;
     });
     pipe.process(ev);
+    // Register our new quotes with the queue position they would inherit: the
+    // volume already resting at that price (orders ahead of us in the queue).
+    hft::OrderBook* book = books.get_book(kToken);
     for (const hft::Order& o : pipe.last_sent()) {
-      fillsim.register_order(o);
+      const hft::Quantity queue_ahead =
+          book != nullptr ? book->displayed_qty_at(o.side, o.price) : 0;
+      fillsim.register_order(o, queue_ahead);
     }
     ++event_index;
     if (want_metrics && event_index % snapshot_every == 0) {
