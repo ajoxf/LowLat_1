@@ -19,6 +19,7 @@
 #include "order_book/book_manager.hpp"
 #include "order_book/order_book.hpp"
 #include "session/symbol_master.hpp"
+#include "strategy/quoting_math.hpp"
 #include "strategy/strategy_base.hpp"
 
 namespace hft {
@@ -187,38 +188,18 @@ class MarketMaking : public StrategyBase {
     return true;
   }
 
-  // Compute the desired bid/ask, starting one tick inside the touch and shifting
-  // the whole pair by an integer number of ticks:
-  //   * inventory skew: when long (positive position) shift DOWN to offload
-  //     (and vice-versa) -- leans against risk;
-  //   * order-flow skew: when the top of book is bid-heavy (buy pressure) shift
-  //     UP to ride the likely up-move instead of being adversely selected.
-  // All integer math -- no floating point on the hot path.
+  // Desired bid/ask via the shared quoting math (src/strategy/quoting_math.hpp):
+  // one tick inside the touch, shifted by inventory skew (lean against
+  // position) and order-flow skew (lean with top-of-book pressure).
   void ComputeDesired(const PriceLevel& bb, const PriceLevel& ba, Price tick,
                       Quantity pos_units, Quantity max_pos_units, Price* desired_bid,
                       Price* desired_ask) const {
-    int inv = 0;
-    if (cfg_.max_inv_skew_ticks > 0 && max_pos_units > 0) {
-      inv = static_cast<int>(static_cast<int64_t>(pos_units) * cfg_.max_inv_skew_ticks /
-                             max_pos_units);
-      inv = Clamp(inv, cfg_.max_inv_skew_ticks);
-    }
-    int flow = 0;
-    if (cfg_.max_flow_skew_ticks > 0) {
-      const int64_t denom = static_cast<int64_t>(bb.total_quantity) + ba.total_quantity;
-      if (denom > 0) {
-        flow = static_cast<int>(
-            static_cast<int64_t>(bb.total_quantity - ba.total_quantity) *
-            cfg_.max_flow_skew_ticks / denom);
-        flow = Clamp(flow, cfg_.max_flow_skew_ticks);
-      }
-    }
-    const Price shift = static_cast<Price>(flow - inv) * tick;
-    *desired_bid = (bb.price - tick) + shift;
-    *desired_ask = (ba.price + tick) + shift;
+    const quoting::DesiredQuotes q = quoting::desired_quotes(
+        bb.price, ba.price, tick, bb.total_quantity, ba.total_quantity, pos_units,
+        max_pos_units, cfg_.max_inv_skew_ticks, cfg_.max_flow_skew_ticks);
+    *desired_bid = q.bid_price;
+    *desired_ask = q.ask_price;
   }
-
-  static int Clamp(int v, int lim) { return v > lim ? lim : (v < -lim ? -lim : v); }
 
   void EmitNew(Token token, bool is_bid, Price price, Quantity qty, Timestamp now,
                ClOrdId* out_id) {

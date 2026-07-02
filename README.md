@@ -122,6 +122,19 @@ Key data structures (all pre-allocated, zero heap traffic on the hot path):
 | `src/order_manager/` | 6 | `NnfEncoder`, `OrderManager` |
 | `src/gateway/` | 7 | `UdpSocket`, `MarketDataGateway`, `OrderGateway` |
 | `src/pipeline.hpp`, `src/main.cpp` | 8 | tick-to-trade wiring |
+| `src/strategy/quoting_math.hpp` | — | shared quote math (inv/flow skew), C++17, used by both paths |
+| `irage/` | — | **production path**: iRage ConnectLib `AlphaStrategy` adapter + mock + tests (see `irage/README.md`) |
+
+## Execution paths
+
+Two ways to reach the exchange, sharing the same quoting math:
+
+1. **iRage ConnectLib (production)** — `irage/mystrat.cpp` plugs our market
+   maker into iRage's `lightening` platform, which owns the NSE session, MTBT
+   feed, RMS and OPS limiting at their BKC colocation. See `irage/README.md`.
+2. **Self-hosted stack (Milestones 1-8)** — our own feed handler, book, NNF
+   encoder, session and gateways. Used for research/backtesting today; becomes
+   a production option only with direct membership + own colo.
 
 ## NSE trading hours (IST)
 

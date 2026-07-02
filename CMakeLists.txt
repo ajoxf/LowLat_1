@@ -129,3 +129,6 @@ endif()
 if(HFT_BUILD_TOOLS)
   add_subdirectory(tools)
 endif()
+
+# iRage ConnectLib strategy adapter (built against the local mock; C++17).
+add_subdirectory(irage)
