@@ -17,6 +17,7 @@
 #include "pipeline.hpp"
 #include "risk/risk_manager.hpp"
 #include "session/symbol_master.hpp"
+#include "sim/fee_model.hpp"
 #include "sim/fill_simulator.hpp"
 #include "strategy/market_making.hpp"
 
@@ -27,7 +28,9 @@ struct BtResult {
   uint64_t orders_rejected = 0;
   uint64_t fills = 0;
   int64_t position = 0;
-  int64_t pnl_inr = 0;
+  int64_t gross_pnl_inr = 0;  // spread capture before costs
+  int64_t fees_inr = 0;       // transaction costs net of rebates (>=0 cost)
+  int64_t pnl_inr = 0;        // net = gross - fees
   uint64_t lat_p50 = 0;
   uint64_t lat_p99 = 0;
   uint64_t lat_p999 = 0;
@@ -38,7 +41,8 @@ struct BtResult {
 // stream is written for the dashboard.
 inline BtResult run_backtest(const std::vector<MarketEvent>& events,
                              const MarketMakingConfig& mm_cfg, Token token, Price mid,
-                             Price tick, const char* metrics_path) {
+                             Price tick, const char* metrics_path,
+                             const FeeModel& fees = FeeModel()) {
   SymbolMaster symbols;
   Instrument cm{};
   cm.token = token;
@@ -69,7 +73,8 @@ inline BtResult run_backtest(const std::vector<MarketEvent>& events,
   const bool want_metrics = metrics_path != nullptr && metrics.open(metrics_path);
   const uint64_t snapshot_every = events.empty() ? 1 : (events.size() / 200) + 1;
 
-  int64_t cash_paisa = 0;
+  int64_t cash_paisa = 0;   // spread capture (gross), in paise
+  int64_t fees_paisa = 0;   // cumulative transaction cost net of rebates
   int64_t position = 0;
   Price mark = mid;
   uint64_t maker_fills = 0;
@@ -90,6 +95,7 @@ inline BtResult run_backtest(const std::vector<MarketEvent>& events,
         cash_paisa += static_cast<int64_t>(f.fill_qty) * f.fill_price;
         position -= f.fill_qty;
       }
+      fees_paisa += fees.cost_paise(f.side, f.fill_price, f.fill_qty);
       ++maker_fills;
     });
     pipe.process(ev);
@@ -108,7 +114,7 @@ inline BtResult run_backtest(const std::vector<MarketEvent>& events,
       snap.orders_rejected = pipe.stats().orders_rejected;
       snap.fills = maker_fills;
       snap.position = position;
-      snap.pnl_inr = (cash_paisa + position * mark) / 100;
+      snap.pnl_inr = (cash_paisa + position * mark - fees_paisa) / 100;  // net of fees
       snap.lat_p50 = pipe.latency().p50();
       snap.lat_p99 = pipe.latency().p99();
       snap.lat_p999 = pipe.latency().p999();
@@ -122,7 +128,9 @@ inline BtResult run_backtest(const std::vector<MarketEvent>& events,
   r.orders_rejected = pipe.stats().orders_rejected;
   r.fills = maker_fills;
   r.position = position;
-  r.pnl_inr = (cash_paisa + position * mark) / 100;
+  r.gross_pnl_inr = (cash_paisa + position * mark) / 100;
+  r.fees_inr = fees_paisa / 100;
+  r.pnl_inr = (cash_paisa + position * mark - fees_paisa) / 100;
   r.lat_p50 = pipe.latency().p50();
   r.lat_p99 = pipe.latency().p99();
   r.lat_p999 = pipe.latency().p999();

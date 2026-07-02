@@ -13,6 +13,7 @@
 #include "common/types.hpp"
 #include "sim/backtest_engine.hpp"
 #include "sim/event_source.hpp"
+#include "sim/fee_model.hpp"
 
 namespace {
 
@@ -21,10 +22,10 @@ constexpr hft::Price kMid = 1000000;
 constexpr hft::Price kTick = 5;
 
 void PrintRow(const char* name, const hft::BtResult& r) {
-  std::printf("%-8s | %9lld | %7llu | %6llu | %5lld | p99=%llu ns\n", name,
+  std::printf("%-12s | %9lld | %8lld | %9lld | %7llu | %5lld\n", name,
+              static_cast<long long>(r.gross_pnl_inr), static_cast<long long>(r.fees_inr),
               static_cast<long long>(r.pnl_inr), static_cast<unsigned long long>(r.fills),
-              static_cast<unsigned long long>(r.orders_sent),
-              static_cast<long long>(r.position), static_cast<unsigned long long>(r.lat_p99));
+              static_cast<long long>(r.position));
 }
 
 }  // namespace
@@ -42,23 +43,36 @@ int main(int argc, char** argv) {
   smart.max_inv_skew_ticks = 2;
   smart.max_flow_skew_ticks = 1;
 
+  // Realistic NSE FO cost model (both legs charged, STT on sells, no rebate).
+  hft::FeeModel fees;  // defaults: rough NSE FO futures rates.
+
+  // The LES / designated-market-maker lever: the same costs plus a maker rebate
+  // credited on both legs. This is the ONLY place a real NSE rebate exists.
+  hft::FeeModel fees_les = fees;
+  fees_les.maker_rebate_bp100 = 250;  // 2.5 bp rebate per leg (illustrative LES).
+
   const hft::BtResult rn =
-      hft::run_backtest(events, naive, kToken, kMid, kTick, "backtest_metrics_naive.jsonl");
+      hft::run_backtest(events, naive, kToken, kMid, kTick, nullptr, fees);
   const hft::BtResult rs =
-      hft::run_backtest(events, smart, kToken, kMid, kTick, "backtest_metrics.jsonl");
+      hft::run_backtest(events, smart, kToken, kMid, kTick, "backtest_metrics.jsonl", fees);
+  const hft::BtResult rl =
+      hft::run_backtest(events, smart, kToken, kMid, kTick, nullptr, fees_les);
 
   std::printf("\n=== backtest comparison (same data, %zu events) ===\n", events.size());
-  std::printf("variant  | PnL (Rs) |  fills  | orders | pos   | latency\n");
-  std::printf("---------+-----------+---------+--------+-------+-----------\n");
+  std::printf("variant      |  gross Rs |  fees Rs |    net Rs |  fills  | pos\n");
+  std::printf("-------------+-----------+----------+-----------+---------+------\n");
   PrintRow("naive", rn);
   PrintRow("smart", rs);
-  std::printf("---------+-----------+---------+--------+-------+-----------\n");
-  std::printf("PnL improvement (smart - naive): Rs %lld\n",
-              static_cast<long long>(rs.pnl_inr - rn.pnl_inr));
+  PrintRow("smart+LES", rl);
+  std::printf("-------------+-----------+----------+-----------+---------+------\n");
+  std::printf("gross->net drag from NSE costs (smart): Rs %lld\n",
+              static_cast<long long>(rs.gross_pnl_inr - rs.pnl_inr));
+  std::printf("LES rebate lever (smart+LES net - smart net): Rs %lld\n",
+              static_cast<long long>(rl.pnl_inr - rs.pnl_inr));
 
-  std::printf("\nNOTE: queue-aware fill model + synthetic random-walk data.\n");
-  std::printf("Random walk has no edge to capture; use recorded NSE MTBT for real PnL.\n");
-  std::printf("Visualise: serve the repo and open dashboard/index.html\n");
-  std::printf("  smart -> backtest_metrics.jsonl   naive -> backtest_metrics_naive.jsonl\n");
+  std::printf("\nNOTE: queue-aware fills + NSE cost model + synthetic random-walk data.\n");
+  std::printf("Costs/rebates are ROUGH defaults -- set them from your member rate card.\n");
+  std::printf("Random walk has no edge; use recorded NSE MTBT for real PnL.\n");
+  std::printf("Visualise: serve the repo and open dashboard/index.html (smart -> backtest_metrics.jsonl)\n");
   return 0;
 }
